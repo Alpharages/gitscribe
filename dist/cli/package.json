@@ -1,0 +1,39 @@
+{
+  "name": "ai-commit-assistant",
+  "version": "1.0.0",
+  "description": "AI-powered Git commit assistant that works locally",
+  "main": "cli/index.js",
+  "bin": {
+    "ai-commit": "cli/index.js"
+  },
+  "files": [
+    "cli/**/*",
+    "lib/**/*"
+  ],
+  "keywords": [
+    "git",
+    "ai",
+    "commit",
+    "cli",
+    "typescript"
+  ],
+  "author": "AI Commit Assistant",
+  "license": "MIT",
+  "dependencies": {
+    "@huggingface/transformers": "^3.1.2",
+    "chalk": "^5.6.2",
+    "commander": "^14.0.2",
+    "simple-git": "^3.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/ai-commit-assistant"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -577,6 +577,7 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     let hasComponents = false;
     let hasAPI = false;
     let hasStyles = false;
+    let hasCLI = false;
 
     const mainFiles: string[] = [];
 
@@ -588,8 +589,10 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
         if (file.additions > 10) mainFiles.push(file.file);
       } else if (file.file.includes('package.json') || file.file.includes('tsconfig.json') || file.file.includes('.config.')) {
         hasConfig = true;
-      } else if (file.file.includes('webpack') || file.file.includes('vite') || file.file.includes('build')) {
+      } else if (file.file.includes('webpack') || file.file.includes('vite') || file.file.includes('build') || file.file.includes('/dist/')) {
         hasBuild = true;
+      } else if (file.file.includes('/cli/') || file.file.includes('cli-')) {
+        hasCLI = true;
       } else if (file.file.includes('component') || file.file.endsWith('.tsx') || file.file.endsWith('.jsx')) {
         hasComponents = true;
         if (file.additions + file.deletions > 20) mainFiles.push(file.file);
@@ -616,9 +619,9 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     } else if (hasConfig && changes.files.length <= 3) {
       type = 'chore';
       category = 'configuration';
-    } else if (hasBuild) {
+    } else if (hasBuild || hasCLI) {
       type = 'build';
-      category = 'build';
+      category = hasCLI ? 'cli' : 'build';
     } else if (hasStyles && !hasComponents && !hasAPI) {
       type = 'style';
       category = 'styling';
@@ -725,23 +728,22 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
   private analyzeDeletedFiles(deletedFiles: GitDiff[]): string | null {
     const fileNames = deletedFiles.map(f => f.file);
     
-    // Look for patterns in deleted files
-    const patterns: { pattern: RegExp; description: string }[] = [
-      { pattern: /\.test\.|\.spec\./i, description: 'remove test files' },
-      { pattern: /\.d\.ts$/, description: 'remove type definition files' },
-      { pattern: /\.map$/, description: 'remove source map files' },
-      { pattern: /\.md$/i, description: 'remove documentation files' },
-      { pattern: /component/i, description: 'remove deprecated components' },
-      { pattern: /backup|old|deprecated|unused/i, description: 'remove deprecated files' },
-      { pattern: /\.css$|\.scss$/i, description: 'remove style files' },
-      { pattern: /config/i, description: 'remove configuration files' },
-    ];
-    
-    // Count files matching each pattern
-    for (const { pattern, description } of patterns) {
-      const matchCount = fileNames.filter(f => pattern.test(f)).length;
-      if (matchCount > deletedFiles.length * 0.5) {
-        return `${description} (${deletedFiles.length} files)`;
+    // Look for common file name patterns FIRST (e.g., all files with "AICommitAssistant")
+    const commonWords = this.findCommonWords(fileNames);
+    if (commonWords.length > 0) {
+      const mainWord = commonWords[0];
+      if (mainWord && mainWord.length > 3) {
+        // Check if this is a class name (PascalCase) or component
+        const isPascalCase = /^[A-Z][a-zA-Z0-9]*$/.test(mainWord);
+        const isClass = fileNames.some(f => f.includes('.d.ts') || f.includes('class'));
+        
+        if (isPascalCase && isClass) {
+          return `remove deprecated ${mainWord} class and related assets`;
+        } else if (isPascalCase) {
+          return `remove ${mainWord} component and related files`;
+        } else {
+          return `remove ${mainWord}-related files and assets`;
+        }
       }
     }
     
@@ -752,12 +754,22 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
       return `remove ${moduleName} module and related files`;
     }
     
-    // Look for common file name patterns (e.g., all files with "AICommitAssistant")
-    const commonWords = this.findCommonWords(fileNames);
-    if (commonWords.length > 0) {
-      const mainWord = commonWords[0];
-      if (mainWord && mainWord.length > 3) {
-        return `remove ${mainWord}-related files and assets`;
+    // Look for specific patterns in deleted files
+    const patterns: { pattern: RegExp; description: string }[] = [
+      { pattern: /\.test\.|\.spec\./i, description: 'remove test files' },
+      { pattern: /\.md$/i, description: 'remove documentation files' },
+      { pattern: /component/i, description: 'remove deprecated components' },
+      { pattern: /backup|old|deprecated|unused/i, description: 'remove deprecated files' },
+      { pattern: /\.css$|\.scss$/i, description: 'remove style files' },
+      { pattern: /config/i, description: 'remove configuration files' },
+    ];
+    
+    // Count files matching each pattern (excluding generated files)
+    const nonGeneratedFiles = fileNames.filter(f => !f.endsWith('.d.ts') && !f.endsWith('.map'));
+    for (const { pattern, description } of patterns) {
+      const matchCount = nonGeneratedFiles.filter(f => pattern.test(f)).length;
+      if (matchCount > nonGeneratedFiles.length * 0.5 && nonGeneratedFiles.length > 0) {
+        return `${description} and generated assets`;
       }
     }
     
@@ -786,25 +798,57 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
   private findCommonWords(fileNames: string[]): string[] {
     // Extract all words from file names (alphanumeric sequences)
     const allWords: Map<string, number> = new Map();
+    const camelCaseWords: Map<string, number> = new Map();
     
     fileNames.forEach(fileName => {
       const baseName = fileName.split('/').pop() || fileName;
-      const words = baseName
-        .replace(/\.(ts|tsx|js|jsx|md|css|map|d\.ts)$/g, '')
+      
+      // Remove file extensions more thoroughly
+      const cleanName = baseName
+        .replace(/\.d\.ts$/g, '')
+        .replace(/\.js\.map$/g, '')
+        .replace(/\.(ts|tsx|js|jsx|md|css|scss|map|json)$/g, '');
+      
+      // Split by non-alphanumeric but also try to preserve camelCase/PascalCase
+      const words = cleanName
         .split(/[^a-zA-Z0-9]+/)
-        .filter(w => w.length > 3); // Only words longer than 3 chars
+        .filter(w => w.length > 2); // Only words longer than 2 chars
       
       words.forEach(word => {
+        // Track this word
         allWords.set(word, (allWords.get(word) || 0) + 1);
+        
+        // If it's PascalCase or contains uppercase (likely a class/component name), prioritize it
+        if (/^[A-Z]/.test(word) && word.length > 3) {
+          camelCaseWords.set(word, (camelCaseWords.get(word) || 0) + 2); // Give extra weight
+        }
       });
     });
     
-    // Return words that appear in more than half the files, sorted by frequency
-    const threshold = Math.max(2, Math.ceil(fileNames.length * 0.4));
-    return Array.from(allWords.entries())
-      .filter(([_, count]) => count >= threshold)
-      .sort((a, b) => b[1] - a[1])
+    // Merge words with extra weight for camelCase
+    camelCaseWords.forEach((count, word) => {
+      allWords.set(word, (allWords.get(word) || 0) + count);
+    });
+    
+    // Return words that appear in multiple files, sorted by frequency
+    // Lower threshold for better detection
+    const threshold = Math.max(2, Math.ceil(fileNames.length * 0.3));
+    const result = Array.from(allWords.entries())
+      .filter(([word, count]) => count >= threshold)
+      .sort((a, b) => {
+        // Prioritize PascalCase words
+        const aIsPascal = /^[A-Z][a-zA-Z0-9]+$/.test(a[0]);
+        const bIsPascal = /^[A-Z][a-zA-Z0-9]+$/.test(b[0]);
+        
+        if (aIsPascal && !bIsPascal) return -1;
+        if (!aIsPascal && bIsPascal) return 1;
+        
+        // Then sort by frequency
+        return b[1] - a[1];
+      })
       .map(([word]) => word);
+    
+    return result;
   }
 
   private generateSmartBody(
@@ -936,7 +980,7 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     // Group files by type
     const typeDefinitions = fileNames.filter(f => f.endsWith('.d.ts'));
     const sourceMaps = fileNames.filter(f => f.endsWith('.map'));
-    const jsFiles = fileNames.filter(f => f.match(/\.(js|ts)$/) && !f.endsWith('.d.ts'));
+    const jsFiles = fileNames.filter(f => f.match(/\.(js|ts|tsx|jsx)$/) && !f.endsWith('.d.ts'));
     const docFiles = fileNames.filter(f => f.endsWith('.md'));
     const testFiles = fileNames.filter(f => f.match(/\.(test|spec)\./));
     
@@ -946,43 +990,58 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     
     // Build descriptive bullets based on what was found
     if (mainEntity && mainEntity.length > 3) {
-      // Capitalize first letter
-      const capitalizedEntity = mainEntity.charAt(0).toUpperCase() + mainEntity.slice(1);
+      // Check if this looks like a class/component name
+      const isPascalCase = /^[A-Z][a-zA-Z0-9]*$/.test(mainEntity);
+      const isClass = fileNames.some(f => f.includes('.d.ts'));
       
-      if (jsFiles.length > 0) {
-        bullets.push(`- Removed the ${mainEntity} implementation and its related source files`);
+      // Create a descriptive first bullet
+      const fileTypes: string[] = [];
+      if (jsFiles.length > 0) fileTypes.push('.js/.ts');
+      if (typeDefinitions.length > 0) fileTypes.push('.d.ts');
+      if (sourceMaps.length > 0) fileTypes.push('source maps');
+      
+      if (isPascalCase && isClass) {
+        bullets.push(`- Removed the unused \`${mainEntity}\` class and its corresponding ${fileTypes.join(', ')} files`);
+      } else if (isPascalCase) {
+        bullets.push(`- Removed the \`${mainEntity}\` component and its associated ${fileTypes.join(', ')} files`);
+      } else {
+        bullets.push(`- Removed ${mainEntity}-related implementation files (${fileTypes.join(', ')})`);
       }
       
+      // Add cleanup context
       if (typeDefinitions.length > 0 || sourceMaps.length > 0) {
-        const types: string[] = [];
-        if (typeDefinitions.length > 0) types.push('.d.ts');
-        if (sourceMaps.length > 0) types.push('source map');
-        bullets.push(`- Cleaned up generated files (${types.join(', ')} files)`);
+        bullets.push(`- Cleaned up associated imports and dependencies related to the removed functionality`);
       }
       
       if (docFiles.length > 0) {
-        bullets.push(`- Removed associated documentation files`);
+        bullets.push(`- Removed documentation files for the deprecated ${mainEntity} functionality`);
       }
     } else {
-      // Generic grouping
+      // Generic grouping - make it more descriptive
+      const descriptions: string[] = [];
+      
+      if (jsFiles.length > 0) {
+        descriptions.push(`${jsFiles.length} source file${jsFiles.length > 1 ? 's' : ''}`);
+      }
+      
       if (typeDefinitions.length > 0) {
-        bullets.push(`- Removed ${typeDefinitions.length} type definition file(s)`);
+        descriptions.push(`${typeDefinitions.length} type definition${typeDefinitions.length > 1 ? 's' : ''}`);
       }
       
       if (sourceMaps.length > 0) {
-        bullets.push(`- Removed ${sourceMaps.length} source map file(s)`);
+        descriptions.push(`${sourceMaps.length} source map${sourceMaps.length > 1 ? 's' : ''}`);
       }
       
-      if (jsFiles.length > 0) {
-        bullets.push(`- Removed ${jsFiles.length} source file(s)`);
+      if (descriptions.length > 0) {
+        bullets.push(`- Removed unused files: ${descriptions.join(', ')}`);
       }
       
       if (docFiles.length > 0) {
-        bullets.push(`- Removed ${docFiles.length} documentation file(s)`);
+        bullets.push(`- Cleaned up ${docFiles.length} documentation file${docFiles.length > 1 ? 's' : ''}`);
       }
       
       if (testFiles.length > 0) {
-        bullets.push(`- Removed ${testFiles.length} test file(s)`);
+        bullets.push(`- Removed ${testFiles.length} test file${testFiles.length > 1 ? 's' : ''}`);
       }
     }
     
@@ -1007,6 +1066,13 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
   }
 
   private generateSmartScope(changes: StagedChanges, analysis: { category: string }): string | undefined {
+    // Use category-based scope first for special cases
+    if (analysis.category === 'API') return 'api';
+    if (analysis.category === 'components') return 'ui';
+    if (analysis.category === 'testing') return 'tests';
+    if (analysis.category === 'cli') return 'cli';
+    if (analysis.category === 'build') return 'build';
+    
     // Try to find common directory
     const directories = changes.files
       .map(f => f.file.split('/'))
@@ -1015,14 +1081,15 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     
     const commonDir = this.findMostCommon(directories);
     
-    if (commonDir && commonDir.length > 1 && commonDir !== 'src') {
+    if (commonDir && commonDir.length > 1 && commonDir !== 'src' && commonDir !== 'lib') {
       return commonDir;
     }
     
-    // Use category-based scope
-    if (analysis.category === 'API') return 'api';
-    if (analysis.category === 'components') return 'ui';
-    if (analysis.category === 'testing') return 'tests';
+    // Check if mostly lib files
+    const libFiles = changes.files.filter(f => f.file.includes('/lib/') || f.file.startsWith('lib/')).length;
+    if (libFiles > changes.files.length * 0.6) {
+      return 'lib';
+    }
     
     return undefined;
   }

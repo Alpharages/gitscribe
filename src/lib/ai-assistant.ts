@@ -53,14 +53,31 @@ export class AICommitAssistant {
   }
 
   async generateCommitMessage(changes: StagedChanges, options: AIProcessingOptions = {}): Promise<CommitMessageSuggestion[]> {
-    // Try AI-based generation first
+    // Check if AI should be skipped (via environment variable or if model is set to 'none')
+    const skipAI = process.env.AI_COMMIT_SKIP_AI === 'true' || this.modelId === 'none';
+    
+    if (skipAI) {
+      console.log('📋 Using intelligent heuristic-based commit message generation');
+      return this.generateFallbackSuggestions(changes);
+    }
+
+    // Try AI-based generation first with timeout
     try {
       if (!this.modelLoaded) {
         await this.loadModel();
       }
 
       if (this.modelLoaded && this.model) {
-        const aiSuggestions = await this.generateAIBasedSuggestions(changes, options);
+        console.log('🤖 Generating commit message with AI...');
+        
+        // Add timeout to prevent hanging (30 seconds)
+        const timeoutMs = parseInt(process.env.AI_COMMIT_TIMEOUT || '30000');
+        const aiSuggestions = await this.withTimeout(
+          this.generateAIBasedSuggestions(changes, options),
+          timeoutMs,
+          'AI generation timed out'
+        );
+        
         if (aiSuggestions && aiSuggestions.length > 0) {
           return aiSuggestions;
         } else {
@@ -68,12 +85,34 @@ export class AICommitAssistant {
         }
       }
     } catch (error) {
-      console.warn('⚠️  AI generation failed, using fallback:', error);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      if (errorMsg.includes('timed out')) {
+        console.warn('⚠️  AI generation is taking too long, using fallback');
+      } else {
+        console.warn('⚠️  AI generation failed, using fallback:', errorMsg);
+      }
     }
 
     // Fall back to heuristic-based suggestions
-    console.log('📋 Using intelligent fallback for commit message generation');
+    console.log('📋 Using intelligent heuristic-based commit message generation');
     return this.generateFallbackSuggestions(changes);
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, ms: number, errorMessage: string): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout;
+    
+    const timeoutPromise = new Promise<T>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new Error(errorMessage)), ms);
+    });
+
+    try {
+      const result = await Promise.race([promise, timeoutPromise]);
+      clearTimeout(timeoutHandle!);
+      return result;
+    } catch (error) {
+      clearTimeout(timeoutHandle!);
+      throw error;
+    }
   }
 
   private async generateAIBasedSuggestions(
@@ -637,6 +676,19 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     // For multiple files, use diff analysis for better description
     const fileCount = changes.files.length;
     
+    // Check if this is primarily a deletion operation
+    const deletedFiles = changes.files.filter(f => f.status === 'D');
+    const addedFiles = changes.files.filter(f => f.status === 'A');
+    const modifiedFiles = changes.files.filter(f => f.status === 'M');
+    
+    // Special handling for large deletions
+    if (deletedFiles.length > fileCount * 0.7) {
+      const deletionAnalysis = this.analyzeDeletedFiles(deletedFiles);
+      if (deletionAnalysis) {
+        return deletionAnalysis;
+      }
+    }
+    
     // If we have a meaningful purpose from diff analysis, use it
     if (diffAnalysis.mainPurpose) {
       return diffAnalysis.mainPurpose;
@@ -668,6 +720,91 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
         return `update multiple files (${fileCount} changes)`;
       }
     }
+  }
+
+  private analyzeDeletedFiles(deletedFiles: GitDiff[]): string | null {
+    const fileNames = deletedFiles.map(f => f.file);
+    
+    // Look for patterns in deleted files
+    const patterns: { pattern: RegExp; description: string }[] = [
+      { pattern: /\.test\.|\.spec\./i, description: 'remove test files' },
+      { pattern: /\.d\.ts$/, description: 'remove type definition files' },
+      { pattern: /\.map$/, description: 'remove source map files' },
+      { pattern: /\.md$/i, description: 'remove documentation files' },
+      { pattern: /component/i, description: 'remove deprecated components' },
+      { pattern: /backup|old|deprecated|unused/i, description: 'remove deprecated files' },
+      { pattern: /\.css$|\.scss$/i, description: 'remove style files' },
+      { pattern: /config/i, description: 'remove configuration files' },
+    ];
+    
+    // Count files matching each pattern
+    for (const { pattern, description } of patterns) {
+      const matchCount = fileNames.filter(f => pattern.test(f)).length;
+      if (matchCount > deletedFiles.length * 0.5) {
+        return `${description} (${deletedFiles.length} files)`;
+      }
+    }
+    
+    // Look for common directory or module being removed
+    const commonPaths = this.findCommonPath(fileNames);
+    if (commonPaths && commonPaths.length > 1) {
+      const moduleName = commonPaths[commonPaths.length - 1];
+      return `remove ${moduleName} module and related files`;
+    }
+    
+    // Look for common file name patterns (e.g., all files with "AICommitAssistant")
+    const commonWords = this.findCommonWords(fileNames);
+    if (commonWords.length > 0) {
+      const mainWord = commonWords[0];
+      if (mainWord && mainWord.length > 3) {
+        return `remove ${mainWord}-related files and assets`;
+      }
+    }
+    
+    return `remove unused files (${deletedFiles.length} files)`;
+  }
+
+  private findCommonPath(filePaths: string[]): string[] | null {
+    if (filePaths.length === 0) return null;
+    
+    const pathParts = filePaths.map(p => p.split('/'));
+    const shortestPath = pathParts.reduce((min, curr) => curr.length < min.length ? curr : min);
+    
+    const commonParts: string[] = [];
+    for (let i = 0; i < shortestPath.length - 1; i++) {
+      const part = shortestPath[i];
+      if (pathParts.every(p => p[i] === part)) {
+        commonParts.push(part);
+      } else {
+        break;
+      }
+    }
+    
+    return commonParts.length > 0 ? commonParts : null;
+  }
+
+  private findCommonWords(fileNames: string[]): string[] {
+    // Extract all words from file names (alphanumeric sequences)
+    const allWords: Map<string, number> = new Map();
+    
+    fileNames.forEach(fileName => {
+      const baseName = fileName.split('/').pop() || fileName;
+      const words = baseName
+        .replace(/\.(ts|tsx|js|jsx|md|css|map|d\.ts)$/g, '')
+        .split(/[^a-zA-Z0-9]+/)
+        .filter(w => w.length > 3); // Only words longer than 3 chars
+      
+      words.forEach(word => {
+        allWords.set(word, (allWords.get(word) || 0) + 1);
+      });
+    });
+    
+    // Return words that appear in more than half the files, sorted by frequency
+    const threshold = Math.max(2, Math.ceil(fileNames.length * 0.4));
+    return Array.from(allWords.entries())
+      .filter(([_, count]) => count >= threshold)
+      .sort((a, b) => b[1] - a[1])
+      .map(([word]) => word);
   }
 
   private generateSmartBody(
@@ -738,6 +875,19 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     // Only mention file stats if they add context
     if (bullets.length === 0) {
       // No specific changes detected, fall back to file-based description
+      
+      // For deletions, be more descriptive
+      if (deleted.length > 0) {
+        const deletedAnalysis = this.analyzeDeletedFilesForBody(deleted);
+        if (deletedAnalysis.length > 0) {
+          bullets.push(...deletedAnalysis);
+        } else if (deleted.length <= 3) {
+          bullets.push(`- Removed: ${deleted.map(f => f.file.split('/').pop()).join(', ')}`);
+        } else {
+          bullets.push(`- Removed ${deleted.length} files`);
+        }
+      }
+      
       if (added.length > 0) {
         if (added.length <= 3) {
           bullets.push(`- Added: ${added.map(f => f.file.split('/').pop()).join(', ')}`);
@@ -751,14 +901,6 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
           bullets.push(`- Modified: ${modified.map(f => f.file.split('/').pop()).join(', ')}`);
         } else {
           bullets.push(`- Modified ${modified.length} existing files`);
-        }
-      }
-      
-      if (deleted.length > 0) {
-        if (deleted.length <= 3) {
-          bullets.push(`- Removed: ${deleted.map(f => f.file.split('/').pop()).join(', ')}`);
-        } else {
-          bullets.push(`- Removed ${deleted.length} files`);
         }
       }
     } else {
@@ -785,6 +927,66 @@ Focus on the MEANING and PURPOSE of the changes, not just file names.`;
     }
     
     return bullets.length > 0 ? bullets.join('\n') : undefined;
+  }
+
+  private analyzeDeletedFilesForBody(deletedFiles: GitDiff[]): string[] {
+    const bullets: string[] = [];
+    const fileNames = deletedFiles.map(f => f.file);
+    
+    // Group files by type
+    const typeDefinitions = fileNames.filter(f => f.endsWith('.d.ts'));
+    const sourceMaps = fileNames.filter(f => f.endsWith('.map'));
+    const jsFiles = fileNames.filter(f => f.match(/\.(js|ts)$/) && !f.endsWith('.d.ts'));
+    const docFiles = fileNames.filter(f => f.endsWith('.md'));
+    const testFiles = fileNames.filter(f => f.match(/\.(test|spec)\./));
+    
+    // Find common words in file names to identify what was removed
+    const commonWords = this.findCommonWords(fileNames);
+    const mainEntity = commonWords.length > 0 ? commonWords[0] : null;
+    
+    // Build descriptive bullets based on what was found
+    if (mainEntity && mainEntity.length > 3) {
+      // Capitalize first letter
+      const capitalizedEntity = mainEntity.charAt(0).toUpperCase() + mainEntity.slice(1);
+      
+      if (jsFiles.length > 0) {
+        bullets.push(`- Removed the ${mainEntity} implementation and its related source files`);
+      }
+      
+      if (typeDefinitions.length > 0 || sourceMaps.length > 0) {
+        const types: string[] = [];
+        if (typeDefinitions.length > 0) types.push('.d.ts');
+        if (sourceMaps.length > 0) types.push('source map');
+        bullets.push(`- Cleaned up generated files (${types.join(', ')} files)`);
+      }
+      
+      if (docFiles.length > 0) {
+        bullets.push(`- Removed associated documentation files`);
+      }
+    } else {
+      // Generic grouping
+      if (typeDefinitions.length > 0) {
+        bullets.push(`- Removed ${typeDefinitions.length} type definition file(s)`);
+      }
+      
+      if (sourceMaps.length > 0) {
+        bullets.push(`- Removed ${sourceMaps.length} source map file(s)`);
+      }
+      
+      if (jsFiles.length > 0) {
+        bullets.push(`- Removed ${jsFiles.length} source file(s)`);
+      }
+      
+      if (docFiles.length > 0) {
+        bullets.push(`- Removed ${docFiles.length} documentation file(s)`);
+      }
+      
+      if (testFiles.length > 0) {
+        bullets.push(`- Removed ${testFiles.length} test file(s)`);
+      }
+    }
+    
+    return bullets;
   }
 
   private generateWhyItMatters(category: string, diffAnalysis: any): string {

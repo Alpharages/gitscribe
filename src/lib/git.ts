@@ -47,20 +47,35 @@ export class GitService {
 
       for (const file of stagedFiles) {
         try {
-          const diff = await this.git.diff(['--cached', file]);
+          // Use '--' separator to explicitly mark file path (handles deleted files)
+          const diff = await this.git.diff(['--cached', '--', file]);
           const diffLines = diff.split('\n');
           const additions = diffLines.filter(line => line.startsWith('+')).length;
           const deletions = diffLines.filter(line => line.startsWith('-')).length;
 
+          const fileStatus = status.files.find(f => f.path === file);
+          const statusChar = fileStatus?.index || 'M';
+
           diffs.push({
             file,
-            status: status.files.find(f => f.path === file)?.index || 'M',
+            status: statusChar,
             additions,
             deletions,
             diff
           });
         } catch (error) {
-          console.warn(`Failed to get diff for ${file}:`, error);
+          console.warn(`Failed to get diff for file: ${file}`, error);
+          // For files that still fail (edge case), add minimal info
+          const fileStatus = status.files.find(f => f.path === file);
+          if (fileStatus) {
+            diffs.push({
+              file,
+              status: fileStatus.index || 'M',
+              additions: 0,
+              deletions: 0,
+              diff: `// Unable to retrieve diff for ${file}`
+            });
+          }
         }
       }
 

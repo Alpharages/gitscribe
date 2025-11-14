@@ -1,6 +1,6 @@
 {
-  "name": "ai-commit-assistant",
-  "version": "1.0.0",
+  "name": "@alpharages/ai-commit-assistant",
+  "version": "1.0.1",
   "description": "AI-powered Git commit assistant that works locally",
   "main": "cli/index.js",
   "bin": {
@@ -8,7 +8,8 @@
   },
   "files": [
     "cli/**/*",
-    "lib/**/*"
+    "lib/**/*",
+    "README.md"
   ],
   "keywords": [
     "git",
@@ -17,7 +18,7 @@
     "cli",
     "typescript"
   ],
-  "author": "AI Commit Assistant",
+  "author": "alpharagesadmin",
   "license": "MIT",
   "dependencies": {
     "@huggingface/transformers": "^3.1.2",
@@ -31,7 +32,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-username/ai-commit-assistant"
+    "url": "https://github.com/alpharages/gitscribe"
+  },
+  "homepage": "https://github.com/alpharages/gitscribe#readme",
+  "bugs": {
+    "url": "https://github.com/alpharages/gitscribe/issues"
   },
   "engines": {
     "node": ">=18"

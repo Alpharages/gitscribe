@@ -28,6 +28,10 @@ chmod +x dist/cli/cli/index.js
 echo "📦 Preparing package..."
 cp cli-package.json dist/cli/package.json
 
+# Copy README for npm
+echo "📄 Copying README..."
+cp CLI-README.md dist/cli/README.md
+
 # Copy required lib files if not already in dist
 if [ ! -f "dist/cli/lib/ai-assistant.js" ]; then
   echo "⚠️  Warning: lib files not found in expected location"
